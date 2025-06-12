@@ -7,15 +7,14 @@ import os  # For detecting CPU cores
 from datetime import datetime, timedelta
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-from escpos.printer import Usb
+from escpos.printer import Network
 
 app = Flask(__name__)
 CORS(app)  # Allow all origins
 
 DB_PATH = "print_queue.db"
-# USB defaults (replace with your printer's VendorID and ProductID)
-DEFAULT_USB_VENDOR_ID = 0x1234  # e.g., 0x04b8
-DEFAULT_USB_PRODUCT_ID = 0x5678  # e.g., 0x0202
+DEFAULT_PRINTER_IP = "192.168.1.100"
+DEFAULT_PRINTER_PORT = 9100
 
 MAX_RETRIES = 3
 WORKER_COUNT = os.cpu_count() or 1
@@ -30,7 +29,7 @@ logging.basicConfig(
     handlers=[logging.StreamHandler()]
 )
 
-# --- Register adapters and converters for datetime ---
+# --- New: Register adapters and converters for datetime ---
 def adapt_datetime(dt):
     return dt.isoformat(" ")
 
@@ -131,19 +130,11 @@ def print_job(job):
     job_id, label, content, meta_json, retries = job
     try:
         meta = json.loads(meta_json or '{}')
+        # how many copies to print
         quantity = int(meta.get('quantity', 1))
-
-        # Helper: parse USB IDs with automatic base detection
-        def parse_id(val, default):
-            try:
-                return int(val, 0)
-            except (TypeError, ValueError):
-                return default
-
-        vendor_id = parse_id(meta.get('usb_vendor_id'), DEFAULT_USB_VENDOR_ID)
-        product_id = parse_id(meta.get('usb_product_id'), DEFAULT_USB_PRODUCT_ID)
-        logging.info(f"Using USB IDs: vendor={hex(vendor_id)}, product={hex(product_id)}")
-        printer = Usb(vendor_id, product_id, timeout=10)
+        printer_ip = meta.get('printer_ip', DEFAULT_PRINTER_IP)
+        printer_port = int(meta.get('printer_port', DEFAULT_PRINTER_PORT))
+        printer = Network(printer_ip, printer_port, timeout=10)
 
         for _ in range(quantity):
             if label:

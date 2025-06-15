@@ -216,4 +216,9 @@ def queue_status():
 if __name__ == '__main__':
     init_db()
     start_services()
-    app.run(host='0.0.0.0', port=8000, threaded=True)
+    app.run(
+        host='0.0.0.0',
+        port=8000,
+        threaded=True,
+        ssl_context=('./certs/cert.pem', './certs/cert.key')
+    )

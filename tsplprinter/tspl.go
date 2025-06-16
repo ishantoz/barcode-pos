@@ -77,8 +77,8 @@ func PrintBarcodeLabelTspl(vidHexStr, pidHexStr string, sizeX, sizeY, dir int, t
 			"DIRECTION %d\r\n"+
 			"CLS\r\n"+
 			"SET PRINTER DT\r\n"+
-			"TEXT 25,%d,\"2\",0,1,1,\"%s\"\r\n"+
-			"BARCODE 20,%d,\"128\",%d,1,0,2,2,\"%s\"\r\n"+
+			"TEXT 15,%d,\"2\",0,1,1,\"%s\"\r\n"+
+			"BARCODE 1,%d,\"128\",%d,1,0,2,2,\"%s\"\r\n"+
 			"PRINT %d,1\r\n"+
 			"CUT\r\n",
 		sizeX,
@@ -96,5 +96,33 @@ func PrintBarcodeLabelTspl(vidHexStr, pidHexStr string, sizeX, sizeY, dir int, t
 	if _, err := ep.Write([]byte(label)); err != nil {
 		return fmt.Errorf("failed to write TSPL data: %w", err)
 	}
+	return nil
+}
+
+// CheckPrinter tries to open (and immediately close) the USB device to verify it exists.
+func CheckPrinterDevice(vidHexStr, pidHexStr string) error {
+	// Parse hex strings
+	vid64, err := strconv.ParseUint(vidHexStr, 0, 16)
+	if err != nil {
+		return fmt.Errorf("invalid Vendor ID %q: %w", vidHexStr, err)
+	}
+	pid64, err := strconv.ParseUint(pidHexStr, 0, 16)
+	if err != nil {
+		return fmt.Errorf("invalid Product ID %q: %w", pidHexStr, err)
+	}
+	vid := gousb.ID(uint16(vid64))
+	pid := gousb.ID(uint16(pid64))
+
+	ctx := gousb.NewContext()
+	defer ctx.Close()
+
+	dev, err := ctx.OpenDeviceWithVIDPID(vid, pid)
+	if err != nil {
+		return fmt.Errorf("error opening device %04x:%04x: %w", vid, pid, err)
+	}
+	if dev == nil {
+		return fmt.Errorf("printer %04x:%04x not found", vid, pid)
+	}
+	dev.Close()
 	return nil
 }

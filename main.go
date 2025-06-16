@@ -23,9 +23,10 @@ const (
 	MaxJobAttempts       = 3
 	WorkerCount          = 3
 	DBPath               = "jobs.db"
+
+	StaleThreshold = 10 * time.Minute
 )
 
-// Job statuses
 const (
 	StatusPending    = "pending"
 	StatusInProgress = "in_progress"
@@ -59,34 +60,35 @@ var (
 )
 
 func main() {
-	// Initialize DB and table
 	if err := initDB(); err != nil {
 		log.Fatalf("DB init error: %v", err)
 	}
 
-	// Start workers
+	go requeueStaleJobs()
+
 	for i := 0; i < WorkerCount; i++ {
 		go worker(i + 1)
 	}
 
-	// Setup Echo
 	e := echo.New()
+	e.HideBanner = true
 	e.Use(middleware.Logger())
 	e.Use(middleware.Recover())
 	e.Use(middleware.CORS())
 
-	// Health check endpoint
+	fmt.Println("🚀 Barcode Print Service started securely on https://localhost:5000")
+
 	e.GET("/health", func(c echo.Context) error {
 		return c.String(http.StatusOK, "OK")
 	})
 
 	e.POST("/print-barcode-labels", enqueueHandler)
 
+	e.GET("/job-status/:id", jobStatusHandler)
+
 	certPath := "./certs/cert.pem"
 	keyPath := "./certs/cert.key"
-
 	log.Printf("Starting HTTPS server on :5000")
-	// Block here; log.Fatal will exit on error
 	if err := e.StartTLS(":5000", certPath, keyPath); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatalf("HTTPS server failed: %v", err)
 	}
@@ -98,7 +100,6 @@ func initDB() error {
 	if err != nil {
 		return err
 	}
-	// verify connection
 	if err := db.Ping(); err != nil {
 		return fmt.Errorf("db ping error: %w", err)
 	}
@@ -115,21 +116,44 @@ func initDB() error {
 	return err
 }
 
+func requeueStaleJobs() {
+	for {
+		dbMu.Lock()
+		_, err := db.Exec(
+			`UPDATE jobs
+			 SET status = ?, updatedAt = CURRENT_TIMESTAMP
+			 WHERE status = ?
+			   AND updatedAt < DATETIME('now', ?)`,
+			StatusPending, StatusInProgress, fmt.Sprintf("-%d minutes", int(StaleThreshold.Minutes())),
+		)
+		dbMu.Unlock()
+		if err != nil {
+			log.Printf("Error requeuing stale jobs: %v", err)
+		}
+		time.Sleep(5 * time.Minute)
+	}
+}
+
 func enqueueHandler(c echo.Context) error {
 	var req PrintRequest
 	if err := c.Bind(&req); err != nil {
-		return c.JSON(http.StatusBadRequest, echo.Map{"error": "Invalid JSON body"})
+		return c.JSON(http.StatusBadRequest, echo.Map{"error": "Invalid JSON"})
 	}
+
 	applyDefaults(&req)
 	if err := validateRequest(&req); err != nil {
 		return c.JSON(http.StatusBadRequest, echo.Map{"error": err.Error()})
+	}
+
+	if err := tsplprinter.CheckPrinterDevice(req.VID, req.PID); err != nil {
+		return c.JSON(http.StatusBadRequest, echo.Map{"error": fmt.Sprintf("Printer device not found, please check connected or not: %s", err)})
 	}
 
 	now := time.Now()
 	dbMu.Lock()
 	res, err := db.Exec(
 		`INSERT INTO jobs (vid,pid,sizeX,sizeY,direction,topText,barcodeData,printCount,status,attempts,createdAt,updatedAt)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
 		req.VID, req.PID, req.SizeX, req.SizeY,
 		req.Direction, req.TopText, req.BarcodeData,
 		req.PrintCount, StatusPending, 0, now, now,
@@ -140,6 +164,19 @@ func enqueueHandler(c echo.Context) error {
 	}
 	id, _ := res.LastInsertId()
 	return c.JSON(http.StatusAccepted, echo.Map{"jobId": id, "status": StatusPending})
+}
+
+func jobStatusHandler(c echo.Context) error {
+	id := c.Param("id")
+	var status string
+	err := db.QueryRow(`SELECT status FROM jobs WHERE id = ?`, id).Scan(&status)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return c.JSON(http.StatusNotFound, echo.Map{"error": "Job not found"})
+		}
+		return c.JSON(http.StatusInternalServerError, echo.Map{"error": "Error fetching job status"})
+	}
+	return c.JSON(http.StatusOK, echo.Map{"status": status})
 }
 
 func applyDefaults(req *PrintRequest) {
@@ -154,9 +191,6 @@ func applyDefaults(req *PrintRequest) {
 	}
 	if req.SizeY == 0 {
 		req.SizeY = 35
-	}
-	if req.Direction == 0 {
-		req.Direction = 1
 	}
 	if req.PrintCount < 1 {
 		req.PrintCount = 1
@@ -183,11 +217,11 @@ func worker(id int) {
 		job, err := fetchJob()
 		if err != nil {
 			log.Printf("Worker %d: fetch error: %v", id, err)
-			time.Sleep(1 * time.Second)
+			time.Sleep(time.Second)
 			continue
 		}
 		if job == nil {
-			time.Sleep(1 * time.Second)
+			time.Sleep(time.Second)
 			continue
 		}
 		processJob(id, job)
@@ -197,10 +231,11 @@ func worker(id int) {
 func fetchJob() (*Job, error) {
 	dbMu.Lock()
 	defer dbMu.Unlock()
-	row := db.QueryRow(
-		`SELECT id, vid, pid, sizeX, sizeY, direction, topText, barcodeData, printCount, attempts
-		 FROM jobs WHERE status = ? AND attempts < ? ORDER BY createdAt LIMIT 1`,
-		StatusPending, MaxJobAttempts)
+	row := db.QueryRow(`
+		SELECT id, vid, pid, sizeX, sizeY, direction, topText, barcodeData, printCount, attempts
+		FROM jobs WHERE status = ? AND attempts < ? ORDER BY createdAt LIMIT 1`,
+		StatusPending, MaxJobAttempts,
+	)
 
 	var job Job
 	var attempts int
@@ -212,15 +247,16 @@ func fetchJob() (*Job, error) {
 		&job.Request.PrintCount, &attempts,
 	)
 	if err != nil {
-		if err == sql.ErrNoRows {
+		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
 		return nil, err
 	}
 
 	_, err = db.Exec(
-		`UPDATE jobs SET status = ?, attempts = attempts + 1, updatedAt = ? WHERE id = ?`,
-		StatusInProgress, time.Now(), job.ID)
+		`UPDATE jobs SET status = ?, attempts = attempts + 1, updatedAt = CURRENT_TIMESTAMP WHERE id = ?`,
+		StatusInProgress, job.ID,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -253,8 +289,9 @@ func processJob(workerID int, job *Job) {
 	}
 
 	_, uerr := db.Exec(
-		`UPDATE jobs SET status = ?, updatedAt = ? WHERE id = ?`,
-		newStatus, time.Now(), job.ID)
+		`UPDATE jobs SET status = ?, updatedAt = CURRENT_TIMESTAMP WHERE id = ?`,
+		newStatus, job.ID,
+	)
 	if uerr != nil {
 		log.Printf("Worker %d update job %d error: %v", workerID, job.ID, uerr)
 	}

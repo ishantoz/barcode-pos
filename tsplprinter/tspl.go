@@ -78,7 +78,7 @@ func PrintBarcodeLabelTspl(vidHexStr, pidHexStr string, sizeX, sizeY, dir int, t
 			"CLS\r\n"+
 			"SET PRINTER DT\r\n"+
 			"TEXT 15,%d,\"2\",0,1,1,\"%s\"\r\n"+
-			"BARCODE 1,%d,\"128\",%d,1,0,2,2,\"%s\"\r\n"+
+			"BARCODE 0,%d,\"128\",%d,1,0,2,2,\"%s\"\r\n"+
 			"PRINT %d,1\r\n"+
 			"CUT\r\n",
 		sizeX,
